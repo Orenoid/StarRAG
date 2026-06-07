@@ -1,21 +1,20 @@
-"""`starrag chat` — simple REPL that runs similarity search across ALL repos.
+"""`starrag chat` — simple REPL that searches one global chunk index.
 
-Loads every FAISS index produced by `add`, then loops:
+Loads the global FAISS index produced by `add`, then loops:
   1. read a query from stdin
-  2. run similarity_search_with_score(query, k=10) on each repo
-  3. merge results, pick global top-10 by score
-  4. print each hit's repo, file_path, chunk_index, score, and a content preview
+  2. run similarity_search_with_score(query, k=10) across all chunks
+  3. print each hit's repo, file_path, chunk_index, score, and a content preview
 """
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 import click
 from langchain_community.vectorstores import FAISS
 
 from . import db
 from .embeddings import build_embeddings
+from .vectorstore import vector_store_path
 
 logger = logging.getLogger(__name__)
 
@@ -24,40 +23,36 @@ TOP_K = 10
 PREVIEW_CHARS = 300
 
 
-def _load_all_stores() -> dict[int, dict]:
-    """Return {repo_id: {"store": FAISS, "owner": str, "name": str}}."""
+def _load_global_store() -> tuple[FAISS, int]:
+    """Return the shared FAISS store and the number of repos tracked in SQLite."""
     repos = db.list_repos()
     if not repos:
         raise click.ClickException("没有已添加的仓库。先运行 `starrag add <url>` 添加。")
 
+    v_path = vector_store_path()
+    if not (v_path / "index.faiss").exists() or not (v_path / "index.pkl").exists():
+        raise click.ClickException("没有可用的全局索引。请运行 `starrag add <url>` 添加或重建仓库。")
+
     embeddings = build_embeddings()
-    stores = {}
-    for row in repos:
-        repo_id = int(row["id"])
-        v_path = Path(row["vector_store_path"])
-        if not v_path.exists():
-            logger.warning("跳过无索引的仓库 %s/%s (repo_id=%d)", row["owner"], row["name"], repo_id)
-            continue
-        store = FAISS.load_local(
-            str(v_path),
-            embeddings,
-            allow_dangerous_deserialization=True,
-        )
-        stores[repo_id] = {"store": store, "owner": row["owner"], "name": row["name"]}
-        logger.info("加载 FAISS 索引: %s/%s (repo_id=%d)", row["owner"], row["name"], repo_id)
-    return stores
+    store = FAISS.load_local(
+        str(v_path),
+        embeddings,
+        allow_dangerous_deserialization=True,
+    )
+    logger.info("加载全局 FAISS 索引: %s (repos=%d)", v_path, len(repos))
+    return store, len(repos)
 
 
-def _search_all(stores: dict, query: str) -> list[tuple]:
-    """Run query against every store, merge, sort by score (asc), return top-K.
+def _search_all(store: FAISS, query: str) -> list[tuple]:
+    """Run query against the global store, sort by score (asc), return top-K.
 
     Each result is a tuple: (score, doc, repo_owner, repo_name).
     """
     all_hits: list[tuple[float, object, str, str]] = []
-    for repo_id, info in stores.items():
-        hits = info["store"].similarity_search_with_score(query, k=TOP_K)
-        for doc, score in hits:
-            all_hits.append((score, doc, info["owner"], info["name"]))
+    hits = store.similarity_search_with_score(query, k=TOP_K)
+    for doc, score in hits:
+        meta = doc.metadata or {}
+        all_hits.append((score, doc, meta.get("owner", "?"), meta.get("name", "?")))
     all_hits.sort(key=lambda t: t[0])
     return all_hits[:TOP_K]
 
@@ -83,10 +78,10 @@ def _print_hit(rank: int, doc, score: float, owner: str, name: str) -> None:
 
 def run_chat() -> None:
     logger.info("进入 chat 模式")
-    stores = _load_all_stores()
+    store, repo_count = _load_global_store()
     click.echo("")
     click.echo(
-        f"已加载 {len(stores)} 个仓库。输入查询后回车,全局 top-{TOP_K} 结果会被打印。"
+        f"已加载 {repo_count} 个仓库的全局索引。输入查询后回车,全局 top-{TOP_K} 结果会被打印。"
     )
     click.echo("空行或输入 exit/quit 退出。")
 
@@ -101,7 +96,7 @@ def run_chat() -> None:
             break
 
         logger.info("查询: %s", query)
-        hits = _search_all(stores, query)
+        hits = _search_all(store, query)
         if not hits:
             click.echo("(没有命中任何 chunk)")
             continue

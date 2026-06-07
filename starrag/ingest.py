@@ -14,7 +14,6 @@ Steps:
 from __future__ import annotations
 
 import logging
-import shutil
 import uuid
 from pathlib import Path
 
@@ -24,7 +23,7 @@ from .embeddings import build_embeddings
 from .filters import iter_repo_files
 from .git_utils import clone_repo
 from .paths import ensure_dirs
-from .vectorstore import build_and_save, vector_store_path
+from .vectorstore import build_and_save, delete_ids, vector_store_path
 
 logger = logging.getLogger(__name__)
 
@@ -58,16 +57,16 @@ def add_repo(url: str, *, force: bool = False) -> None:
 
     # ---- 3. record / refresh repo row --------------------------------------------
     logger.info("[2/5] 写入 SQLite 元数据")
+    stale_chunk_ids: list[str] = []
     if existing and force:
         repo_id = int(existing["id"])
-        db.delete_repo_chunks(repo_id)
-        old_vector_dir = Path(existing["vector_store_path"])
-        if old_vector_dir.exists():
-            logger.info("清理旧 FAISS 索引: %s", old_vector_dir)
-            shutil.rmtree(old_vector_dir, ignore_errors=True)
-        # We don't update the row itself (URL is the same); the path columns
-        # were already correct.
+        stale_chunk_ids = db.list_chunk_ids_by_repo(repo_id)
         v_path = vector_store_path(repo_id)
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE repos SET local_path = ?, vector_store_path = ? WHERE id = ?",
+                (str(local_path), str(v_path), repo_id),
+            )
     else:
         # We need repo_id BEFORE we know vector_store_path layout; since the
         # path is purely derived from repo_id, we insert with a placeholder
@@ -92,6 +91,11 @@ def add_repo(url: str, *, force: bool = False) -> None:
     files = list(iter_repo_files(local_path))
     if not files:
         logger.warning("没有可处理的文件,流程结束")
+        if existing and force:
+            if stale_chunk_ids:
+                embeddings = build_embeddings()
+                delete_ids(ids=stale_chunk_ids, embeddings=embeddings)
+            db.delete_repo_chunks(repo_id)
         return
 
     chunks = list(
@@ -105,6 +109,11 @@ def add_repo(url: str, *, force: bool = False) -> None:
     )
     if not chunks:
         logger.warning("切分后无 chunk,流程结束")
+        if existing and force:
+            if stale_chunk_ids:
+                embeddings = build_embeddings()
+                delete_ids(ids=stale_chunk_ids, embeddings=embeddings)
+            db.delete_repo_chunks(repo_id)
         return
 
     chunk_ids = [str(uuid.uuid4()) for _ in chunks]
@@ -112,6 +121,9 @@ def add_repo(url: str, *, force: bool = False) -> None:
     # ---- 5. embed + persist FAISS -------------------------------------------------
     logger.info("[4/5] 构建嵌入并写入 FAISS")
     embeddings = build_embeddings()
+    if existing and force:
+        delete_ids(ids=stale_chunk_ids, embeddings=embeddings)
+        db.delete_repo_chunks(repo_id)
     build_and_save(
         repo_id=repo_id,
         documents=chunks,

@@ -95,6 +95,15 @@ def delete_repo_chunks(repo_id: int) -> None:
         conn.execute("DELETE FROM chunks WHERE repo_id = ?", (repo_id,))
 
 
+def list_chunk_ids_by_repo(repo_id: int) -> list[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id FROM chunks WHERE repo_id = ? ORDER BY created_at",
+            (repo_id,),
+        ).fetchall()
+    return [str(row["id"]) for row in rows]
+
+
 def insert_chunks(rows: list[dict]) -> None:
     if not rows:
         return
