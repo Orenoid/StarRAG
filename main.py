@@ -12,7 +12,7 @@ def cli():
 
 @cli.command()
 def chat():
-    """在所有已添加的仓库里做 similarity search,REPL 形式打印 top-10 chunk。"""
+    """在所有已添加的仓库里搜索，打印 top-10 repo 信息和 chunk 内容。"""
     setup_logging()
     run_chat()
 

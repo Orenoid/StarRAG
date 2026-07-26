@@ -68,6 +68,12 @@ def get_repo_by_url(url: str) -> sqlite3.Row | None:
     return row
 
 
+def get_repo_by_id(repo_id: int) -> sqlite3.Row | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM repos WHERE id = ?", (repo_id,)).fetchone()
+    return row
+
+
 def list_repos() -> list[sqlite3.Row]:
     with connect() as conn:
         rows = conn.execute("SELECT * FROM repos ORDER BY created_at DESC").fetchall()
@@ -102,6 +108,21 @@ def list_chunk_ids_by_repo(repo_id: int) -> list[str]:
             (repo_id,),
         ).fetchall()
     return [str(row["id"]) for row in rows]
+
+
+def get_chunk_id(*, repo_id: int, file_path: str, chunk_index: int) -> str | None:
+    """Resolve a chunk ID from the metadata stored in older FAISS indexes."""
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id
+            FROM chunks
+            WHERE repo_id = ? AND file_path = ? AND chunk_index = ?
+            LIMIT 1
+            """,
+            (repo_id, file_path, chunk_index),
+        ).fetchone()
+    return str(row["id"]) if row else None
 
 
 def insert_chunks(rows: list[dict]) -> None:

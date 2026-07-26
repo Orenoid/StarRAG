@@ -117,6 +117,8 @@ def add_repo(url: str, *, force: bool = False) -> None:
         return
 
     chunk_ids = [str(uuid.uuid4()) for _ in chunks]
+    for chunk_id, chunk in zip(chunk_ids, chunks):
+        chunk.metadata["chunk_id"] = chunk_id
 
     # ---- 5. embed + persist FAISS -------------------------------------------------
     logger.info("[4/5] 构建嵌入并写入 FAISS")
